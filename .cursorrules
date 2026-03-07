@@ -1,0 +1,90 @@
+# Role and Context
+You are a top-tier AI researcher and senior PyTorch deep learning engineer, specializing in Physics-Informed Neural Networks (PINNs), Graph Neural Networks (GNNs), and Traffic Flow Dynamics. 
+You are tasked with upgrading an existing traffic network reconfiguration graph model into a "Pseudo-Spatiotemporal Physics-Informed Diffusion Model" (ST-PINN).
+
+CRITICAL CONSTRAINT: **NO OD DATA CAN BE USED, EVEN IN THE LOSS FUNCTION.** We rely entirely on the historical equilibrium flows (`flow_old`) to derive the implicit physical boundaries of the system.
+
+---
+
+# The Complete Mathematical Construction of the Self-Driven Physical System
+This model is not a black-box mapping. It is a self-driven physical simulator unrolled over $K$ pseudo-time steps. You MUST strictly implement the following mathematical framework.
+
+## Definitions & Spaces (CRUCIAL: Do not mix them up!)
+- $k \in \{0, ..., K\}$: The pseudo-time step (equivalent to the GNN layer depth).
+- $\mathbf{h}_e^{(k)}$: Edge hidden feature vector in the GNN (Latent space, no direct physical meaning).
+- $f_{e\_scaled}^{(k)}$: Scalar edge flow in *normalized* space (used for neural network I/O and $L_{Data}$).
+- $f_{e\_real}^{(k)}$: Scalar edge flow in *real physical* space (veh/hr). Conversion: $f_{real} = f_{scaled} \times \sigma_{flow} + \mu_{flow}$.
+- $\rho_v^{(k)}$: Node pressure / residual accumulation in *real physical* space.
+- $D_v$: Node target net demand in *real physical* space. 
+
+## Phase 1: Physical Boundary Initialization (At data generation & $k=0$)
+Instead of using OD matrices, we extract the implicit net demand $D_v$ from the OLD graph's real flow:
+$$D_v = \sum_{e \in In_{old}(v)} f_{e, old\_real} - \sum_{e \in Out_{old}(v)} f_{e, old\_real}$$
+
+At $k=0$ (when the topology suddenly changes), we place the old flows onto the NEW graph (new edges get 0 flow). This creates an initial flow imbalance (pressure shockwave) because the topology is broken:
+$$\rho_v^{(0)} = \left( \sum_{e \in In_{new}(v)} f_{e\_real}^{(0)} - \sum_{e \in Out_{new}(v)} f_{e\_real}^{(0)} \right) - D_v$$
+*(Physical meaning: $\rho_v^{(0)}$ is the initial accumulated traffic pressure caused by the road network disruption. High positive $\rho$ means traffic jam; negative $\rho$ means demand void).*
+
+## Phase 2: Pseudo-Time Diffusion (The GNN Loop for $k=1 \dots K$)
+For each pseudo-time step, the system simulates fluid diffusing from high pressure to low pressure:
+
+1. **Neural Darcy's Law (Compute Flow Delta):**
+   The GNN observes the pressure difference and edge properties (capacity/speed), and predicts how much flow should shift:
+   $$\mathbf{h}_e^{(k)} = \text{GNN\_with\_Global\_Attention}\left(\mathbf{Attr}_{e}, \mathbf{h}_e^{(k-1)}, \rho_{u}^{(k-1)}, \rho_{v}^{(k-1)}\right)$$
+   $$\Delta f_{e\_scaled}^{(k)} = \text{MLP\_Readout}(\mathbf{h}_e^{(k)})$$
+
+2. **Update Edge Flow:**
+   $$f_{e\_scaled}^{(k)} = f_{e\_scaled}^{(k-1)} + \Delta f_{e\_scaled}^{(k)}$$
+   Convert to real space: $\Delta f_{e\_real}^{(k)} = \Delta f_{e\_scaled}^{(k)} \times \sigma_{flow}$
+
+3. **The Corrected Discrete LWR Equation (Node Pressure Update):**
+   *(Note: We MUST integrate the DELTA flow, NOT the total flow!)*
+   $$\rho_v^{(k)} = \rho_v^{(k-1)} + \left( \sum_{e \in In_{new}(v)} \Delta f_{e\_real}^{(k)} - \sum_{e \in Out_{new}(v)} \Delta f_{e\_real}^{(k)} \right)$$
+
+## Phase 3: Physics-Informed Loss
+After $K$ steps, the system must reach a new equilibrium.
+- **Data Loss:** $L_{Data} = \text{MSE}\left(f_{e\_scaled}^{(K)}, \ y_{scaled}\right)$
+- **Equilibrium Loss (Physics constraint):** $L_{Eq} = \text{MSE}\left( \frac{\rho_v^{(K)}}{\sigma_{flow}}, \ 0 \right)$
+*(Forcing $\rho_v^{(K)}$ to 0 ensures the final routed flows perfectly satisfy the implicit OD demand $D_v$ without ever needing the OD matrix).*
+
+---
+
+# CRITICAL Rules & Don'Ts (DO NOT VIOLATE)
+1. **Never confuse Vectors and Scalars**: $\mathbf{h}_e$ is a high-dim hidden feature. $f_e$ and $\rho_v$ are purely physical SCALARS (`[E, 1]` or `[V, 1]`).
+2. **The Node Update Equation**: Use the exact Discrete LWR formula provided above using $\Delta f_{e\_real}^{(k)}$. Do NOT integrate total flow, integrate the DELTA flow.
+3. **Absolutely NO OD MATRIX**: Ensure `data.net_demand` in `build_network_pairs_dataset.py` is calculated using `flows_old` (in real space), NOT `od_matrix`. 
+4. **Space Consistency**: To compute flow conservation ($\rho_v$), the flows MUST be un-normalized using the training set's `flow_scaler` standard deviation (`scale_`). Do not compute conservation loss directly on normalized flows!
+
+---
+
+# Implementation Step-by-Step Plan
+Execute these phases sequentially. Wait for user approval before moving to the next phase.
+
+## Phase 1: Fix Dataset Generation (Strictly No OD)
+* Modify `build_network_pairs_dataset.py`. Calculate `net_demand` (which represents $D_v$) using `pair['flows_old']` (in real space) and `pair['edge_list_old']`. 
+* Completely remove any usage of `pair['od_matrix']`.
+* Re-run the dataset generation script to ensure the new `net_demand` perfectly reflects the old graph's flow divergence.
+
+## Phase 2: Initial State Projection ($k=0$)
+* Inside the model forward pass (`topology_model.py` or new `st_pinn_model.py`), initialize $f_{e\_scaled}^{(0)}$ on `edge_index_new`. 
+* **Logic**: If the new edge exists in `edge_index_old`, map its `flow_old` value. If it's a completely new edge, initialize its scaled flow to `(0.0 - flow_mean) / flow_std`.
+* Initialize $\rho_v^{(0)}$ in REAL space using the formula in the Mathematical Construction section. Use `torch_scatter.scatter_add` for efficient sum operations.
+
+## Phase 3: The Pseudo-Time Recurrent GNN Cell
+* Implement a `for k in range(K):` loop (default $K=4$).
+* Implement the Dual-Stream logic:
+    * **Local Stream**: A GatedGCN layer taking updated edge features, node pressures $\rho$, and current flow $f$.
+    * **Global Stream**: A Self-Attention mechanism over node representations (Virtual Edges).
+* Decode $\Delta f_{scaled}$ using a readout MLP.
+* Apply the **Corrected Discrete LWR equation** to strictly update $\rho_v^{(k)}$.
+
+## Phase 4: Physics-Informed Loss
+* Modify `flow_conservation_loss.py`.
+After $K$ steps, the system must reach a new equilibrium.
+- **Data Loss:** $L_{Data} = \text{MSE}\left(f_{e\_scaled}^{(K)}, \ y_{scaled}\right)$
+- **Equilibrium Loss (Terminal Physics Constraint):** $L_{Eq} = \text{MSE}\left( \frac{\rho_v^{(K)}}{\sigma_{flow}}, \ 0 \right)$
+  *(Note: Divide by $\sigma_{flow}$ to normalize the physical scale so its gradients match $L_{Data}$!)*
+$L_{total} = L_{Data} +\lambda L_{Eq}$
+
+# Final Note to Cursor
+Your goal is to write extremely clean, well-documented, PyTorch-idiomatic code. Use `torch_scatter.scatter_add` efficiently for computing in-flows and out-flows. Double-check all tensor shapes. Ask the user for clarification if needed before writing large blocks of code.
