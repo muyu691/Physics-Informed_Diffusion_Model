@@ -79,7 +79,7 @@ $$ L_{Eq} = \text{MSE}\left(\frac{\rho_v^{(K)}}{\sigma}, 0\right) $$
 Our ST-PINN model achieves State-of-the-Art performance across multiple metrics. The ablation study explicitly demonstrates the necessity of the physics-informed mechanisms and the implicit virtual routing layer.
 
 | Model / Ablation Variant | R2 (↑) | MSE (↓) | RMSE (↓) | Global WMAPE (%) (↓) | New Edges WMAPE (%) (↓) | 95% Worst-case WMAPE (%) (↓) | Test Time per Graph (ms) |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| --- | --- | --- | --- | --- | --- | --- | --- |
 | **Ours (Physics-Informed Diffusion)** | **0.9038** | **0.0971** | **0.3116** | 24.80 | **40.36** | **37.67** | 2.78 |
 | Ours (Previous: GNN+PINN) | 0.8854 | 0.1157 | 0.3401 |**24.29** | 41.05 | 39.54| 2.30 |
 | Node-Centric GNN | 0.8803 | 0.1209 | 0.3477 | 24.83 | 43.40 | 41.66| **0.98** |
