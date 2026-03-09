@@ -1,4 +1,3 @@
-```markdown
 # ST-PINN: Pseudo-Spatiotemporal Physics-Informed Diffusion Model
 
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.x-ee4c2c?logo=pytorch)](https://pytorch.org/)
