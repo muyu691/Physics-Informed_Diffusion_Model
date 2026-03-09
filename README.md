@@ -132,6 +132,3 @@ python main.py --cfg configs/GatedGCN/network-pairs-topology.yaml
 
 ```
 
-```
-
-```
