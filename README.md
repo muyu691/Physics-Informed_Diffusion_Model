@@ -70,7 +70,7 @@ $$ L_{Data} = \text{MSE}(f_{scaled}^{(K)}, y_{scaled}) $$
 
 $$ L_{Eq} = \text{MSE}\left(\frac{\rho_v^{(K)}}{\sigma}, 0\right) $$
 
-*Note: Division by the flow standard deviation $ \sigma $ normalizes the real-space pressure back to dimensionless $ O(1) $ space, perfectly matching the gradient scale of $ L_{Data} $ to prevent gradient explosion.*
+Note: Division by the flow standard deviation $\sigma$ normalizes the real-space pressure back to dimensionless $O(1)$ space, perfectly matching the gradient scale of $L_{Data}$ to prevent gradient explosion.
 
 ---
 
