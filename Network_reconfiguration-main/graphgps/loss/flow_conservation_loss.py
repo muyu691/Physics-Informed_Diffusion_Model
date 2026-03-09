@@ -1,10 +1,10 @@
 """
-Phase 4: ST-PINN Three-Part Physics-Informed Loss
-==================================================
+Phase 4: ST-PINN Physics-Informed Loss
+=======================================
 
-Three-part loss for the Pseudo-Spatiotemporal Diffusion Model:
+Two-part loss function for the Pseudo-Spatiotemporal Diffusion Model:
 
-  L_total = L_Data + λ_eq · L_Eq + λ_pde · L_PDE
+  L_total = L_Data + λ_eq · L_Eq
 
   ┌─────────────────────────────────────────────────────────────────┐
   │ L_Data = MSE(f_scaled^(K), y_scaled)                            │
@@ -14,33 +14,27 @@ Three-part loss for the Pseudo-Spatiotemporal Diffusion Model:
   │   Terminal equilibrium constraint.  Forces the final pressure   │
   │   field to zero, ensuring predicted flows satisfy implicit OD   │
   │   demand D_v — without ever needing the OD matrix.              │
-  ├─────────────────────────────────────────────────────────────────┤
-  │ L_PDE = mean_{k=1}^{K-1} L1(ρ_v^(k) / σ, 0)                   │
-  │   Intermediate smoothing constraint.  Encourages pressure to    │
-  │   decay monotonically at every pseudo-time step, not just at    │
-  │   the terminal step.  Uses L1 (MAE) for robustness to outlier  │
-  │   nodes with transiently high pressure during redistribution.   │
-  │   Skips k=0 (initial shockwave, non-zero by definition) and    │
-  │   k=K (already penalized by L_Eq with stricter MSE).            │
+  │                                                                 │
+  │   Division by σ (flow_std) normalizes the physical-space        │
+  │   pressure to dimensionless O(1), matching gradient scale of    │
+  │   L_Data to prevent gradient imbalance.                         │
   └─────────────────────────────────────────────────────────────────┘
 
-  Division by σ (flow_std) normalizes all physical-space pressures
-  to dimensionless O(1), matching gradient scale of L_Data.
-
 Key design:
-  Phase 3 forward pass pre-computes ρ_v^(0..K) and attaches them to
-  ``batch.rho_v_final`` and ``batch.rho_v_history``.  This loss
-  simply reads the pre-computed values — gradients flow naturally
-  back through the entire diffusion loop via BPTT.
+  The forward pass (Phase 3) pre-computes ρ_v^(K) via the Corrected
+  Discrete LWR equation and attaches it to ``batch.rho_v_final``.
+  This loss function simply reads the pre-computed value — no
+  redundant scatter_add recomputation needed.  Gradients flow
+  naturally through rho_v_final back into the diffusion loop (BPTT).
 
 Backward compatibility:
-  If ``batch.rho_v_final`` is absent (baseline model), only L_Data
-  is returned.  If K ≤ 1 (no intermediate steps), L_PDE = 0.
+  If ``batch.rho_v_final`` is not present (e.g., running a baseline
+  model without the diffusion loop), L_Eq is skipped and only L_Data
+  is returned.
 
 Configuration dependencies:
-  cfg.dataset.flow_std   : float  - StandardScaler σ
-  cfg.model.lambda_eq    : float  - Terminal equilibrium weight (default 1.0)
-  cfg.model.lambda_pde   : float  - Intermediate smoothing weight (default 0.05)
+  cfg.dataset.flow_std  : float  - StandardScaler σ (for L_Eq normalization)
+  cfg.model.lambda_eq   : float  - Equilibrium loss weight (default 1.0)
 """
 
 import torch
@@ -54,82 +48,41 @@ def compute_pinn_loss(
     batch,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    ST-PINN loss: L_total = L_Data + λ_eq · L_Eq + λ_pde · L_PDE.
+    ST-PINN loss: L_total = L_Data + λ_eq · L_Eq.
 
     Args:
         pred  : [E_new, 1]  predicted equilibrium flows (normalized space)
         batch : PyG Batch object containing:
-                  batch.y              : [E_new, 1]  ground truth (normalized)
-                  batch.rho_v_final    : [N, 1]      terminal ρ^(K) (real, veh/hr)
-                  batch.rho_v_history  : list of K+1 tensors [N, 1]
-                                         ρ^(0), ρ^(1), …, ρ^(K)
+                  batch.y             : [E_new, 1]  ground truth (normalized)
+                  batch.rho_v_final   : [N, 1]      terminal pressure ρ^(K)
+                                                     (real space, veh/hr)
+                                        — attached by Phase 3 forward pass
 
     Returns:
-        total_loss : scalar        weighted sum for backward
+        total_loss : scalar        L_Data + λ_eq · L_Eq (for backward)
         pred       : [E_new, 1]    predictions (for logger metrics)
-
-    Side effects:
-        Attaches individual loss scalars to batch for logging:
-          batch.loss_data  : scalar  (detached)
-          batch.loss_eq    : scalar  (detached)
-          batch.loss_pde   : scalar  (detached)
     """
     true = batch.y  # [E_new, 1]
 
-    # ══ L_Data: data-fitting loss (normalized space) ══════════════════
+    # ── L_Data: data-fitting loss (normalized space) ──────────────────
     loss_data = F.mse_loss(pred, true)
 
-    # ══ Physics losses (require Phase 3 diffusion outputs) ════════════
+    # ── L_Eq: terminal equilibrium constraint ─────────────────────────
     rho_v_final = getattr(batch, 'rho_v_final', None)
-    rho_v_history = getattr(batch, 'rho_v_history', None)
 
     if rho_v_final is not None:
-        flow_std = cfg.dataset.flow_std  # σ (scalar, veh/hr)
+        flow_std = cfg.dataset.flow_std             # σ (scalar, veh/hr)
+        rho_scaled = rho_v_final / flow_std          # [N, 1] → dimensionless
+        loss_eq = F.mse_loss(rho_scaled, torch.zeros_like(rho_scaled))
 
-        # ── L_Eq: terminal equilibrium MSE ────────────────────────────
-        # ρ^(K) should → 0 for perfect flow conservation
-        rho_final_scaled = rho_v_final / flow_std        # [N, 1], dimensionless
-        loss_eq = F.mse_loss(
-            rho_final_scaled,
-            torch.zeros_like(rho_final_scaled),
-        )
-
-        # ── L_PDE: intermediate smoothing L1 ─────────────────────────
-        # Average L1‖ρ^(k)/σ‖ over k = 1 … K-1
-        #   k=0  skipped: initial shockwave (large by definition)
-        #   k=K  skipped: already penalized by L_Eq (stricter MSE)
-        #
-        # rho_v_history layout: [ρ^(0), ρ^(1), …, ρ^(K)]
-        #   len = K+1,  intermediate range = indices 1 … K-1
-        if rho_v_history is not None and len(rho_v_history) > 2:
-            intermediate_losses = []
-            for k in range(1, len(rho_v_history) - 1):
-                rho_k_scaled = rho_v_history[k] / flow_std   # [N, 1]
-                intermediate_losses.append(
-                    F.l1_loss(rho_k_scaled, torch.zeros_like(rho_k_scaled))
-                )
-            # Mean across K-1 intermediate steps → single scalar
-            loss_pde = torch.stack(intermediate_losses).mean()
-        else:
-            loss_pde = torch.tensor(0.0, device=pred.device)
-
-        # ── Total weighted loss ───────────────────────────────────────
-        lambda_eq = cfg.model.lambda_eq      # default 1.0
-        lambda_pde = cfg.model.lambda_pde    # default 0.05
-        total_loss = (
-            loss_data
-            + lambda_eq * loss_eq
-            + lambda_pde * loss_pde
-        )
+        lambda_eq = cfg.model.lambda_eq              # default 1.0
+        total_loss = loss_data + lambda_eq * loss_eq
     else:
-        # Baseline model without diffusion loop → data loss only
         loss_eq = torch.tensor(0.0, device=pred.device)
-        loss_pde = torch.tensor(0.0, device=pred.device)
         total_loss = loss_data
 
-    # ══ Attach individual losses to batch for logging ═════════════════
+    # ── Attach individual losses to batch for optional logging ────────
     batch.loss_data = loss_data.detach()
     batch.loss_eq = loss_eq.detach()
-    batch.loss_pde = loss_pde.detach()
 
     return total_loss, pred

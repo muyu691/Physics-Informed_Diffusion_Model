@@ -35,19 +35,12 @@ def extended_cfg(cfg):
     # instead, when False, follow cfg.train.eval_period checkpointing frequency.
     cfg.train.ckpt_best = False
 
-    # ── Phase 4：ST-PINN 三部分物理损失超参数 ──────────────────────────────
-    #   L_total = L_Data + λ_eq * L_Eq + λ_pde * L_PDE
-    #
-    # λ_eq: 终端平衡约束权重
-    #   L_Eq = MSE(ρ_v^(K) / σ, 0)
-    #   Forces terminal pressure → 0 (flow conservation satisfied).
+    # ── Phase 4：ST-PINN 物理损失超参数 ────────────────────────────────────
+    # 平衡损失权重 λ_eq：L_total = L_Data + λ_eq * L_Eq
+    #   L_Eq = MSE(ρ_v^(K) / σ, 0) 终端压力平衡约束
+    # λ_eq = 1.0 使数据损失和物理约束具有相同权重；
+    # 由于 L_Eq 已经过 /σ 归一化，梯度尺度天然匹配 L_Data。
     cfg.model.lambda_eq = 1.0
-
-    # λ_pde: 中间步平滑约束权重
-    #   L_PDE = mean_{k=1}^{K-1} L1(ρ_v^(k) / σ, 0)
-    #   Encourages monotonic pressure decay across pseudo-time steps.
-    #   Small weight (0.05) acts as regularizer without dominating L_Data.
-    cfg.model.lambda_pde = 0.05
 
     # (Legacy) 旧守恒损失参数，保留用于基线模型向后兼容
     cfg.model.lambda_cons = 0.1
