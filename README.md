@@ -22,6 +22,7 @@ At each pseudo-time step $k$ (each layer in GatedGCN), the network observes the 
 ### 2. Discrete LWR Equation
 Traffic accumulation (jam) or demand void at any node $v$ is represented as a physical "pressure" $\rho_v$. At each step, this pressure is updated strictly according to the Lighthill-Whitham-Richards (LWR) conservation law:
 $$\rho_v^{(k)} = \rho_v^{(k-1)} + \sum_{e \in In(v)} \Delta f_{e, real}^{(k)} - \sum_{e \in Out(v)} \Delta f_{e, real}^{(k)}$$
+
 This O(E) vectorized scatter-add aggregation happens in real physical space (veh/hr) to guarantee mass conservation.
 
 ### 3. Implicit Demand Virtual Routing Layer
